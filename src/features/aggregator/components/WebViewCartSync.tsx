@@ -28,50 +28,257 @@ const PLATFORM_URLS = {
 const INJECTION_SCRIPTS = {
   amazon: `
     (function() {
+      const send = (payload) => {
+        if (
+          window.ReactNativeWebView &&
+          typeof window.ReactNativeWebView.postMessage === 'function'
+        ) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+        }
+      };
+
       try {
         const items = [];
-        const seenTitles = new Set();
-        const selectors = ['.sc-list-item', '.sc-mobile-cart-list-item', '[id^="sc-item-"]'];
-        
+        const seenItems = new Set();
+        const debugLogs = ['Amazon extractor started'];
+
+        const getCurrencyValues = (value) =>
+          Array.from((value || '').matchAll(/(?:₹|Rs\\.?|INR|\\$)\\s*([0-9][0-9,]*)/gi))
+            .map((match) => parseFloat((match[1] || '').replace(/,/g, '')))
+            .filter((num) => Number.isFinite(num) && num > 0 && num <= 500000);
+
+        const parsePriceFromText = (value) => {
+          const currency = getCurrencyValues(value);
+          if (currency.length > 0) return currency[0];
+          const fallback = (value || '').match(/\\b([1-9][0-9,]{2,})\\b/);
+          if (!fallback) return 0;
+          const parsed = parseFloat((fallback[1] || '').replace(/,/g, ''));
+          return Number.isFinite(parsed) && parsed <= 500000 ? parsed : 0;
+        };
+
+        const getImageUrl = (item) => {
+          if (!item) return '';
+          const normalize = (value) => {
+            const url = (value || '').trim();
+            if (!url) return '';
+            const normalized = url.startsWith('//') ? 'https:' + url : url;
+            const lower = normalized.toLowerCase();
+            const isPlaceholder =
+              lower.startsWith('data:image/gif') ||
+              lower.includes('transparent-pixel') ||
+              lower.includes('loadingspinner') ||
+              lower.includes('/loading/') ||
+              lower.includes('/spinner/');
+            return isPlaceholder ? '' : normalized;
+          };
+
+          const extractDynamicImageUrls = (rawValue) => {
+            const urls = [];
+            const raw = (rawValue || '').trim();
+            if (!raw) return urls;
+
+            // Try JSON first.
+            try {
+              const parsed = JSON.parse(raw);
+              Object.keys(parsed || {}).forEach((key) => {
+                const candidate = normalize(key);
+                if (candidate) urls.push(candidate);
+              });
+            } catch (e) {
+              // Fallback: amazon sometimes stores HTML-escaped JSON.
+              const decoded = raw.replace(/&quot;/g, '"');
+              try {
+                const parsedDecoded = JSON.parse(decoded);
+                Object.keys(parsedDecoded || {}).forEach((key) => {
+                  const candidate = normalize(key);
+                  if (candidate) urls.push(candidate);
+                });
+              } catch (e2) {}
+            }
+            return urls;
+          };
+
+          const imageNodes = Array.from(
+            item.querySelectorAll('img.sc-product-image, img[data-old-hires], img[data-a-dynamic-image], img')
+          );
+
+          const candidateUrls = [];
+          imageNodes.forEach((img) => {
+            const oldHiRes = normalize(img.getAttribute('data-old-hires') || '');
+            if (oldHiRes) candidateUrls.push(oldHiRes);
+
+            extractDynamicImageUrls(img.getAttribute('data-a-dynamic-image') || '').forEach((url) =>
+              candidateUrls.push(url)
+            );
+
+            const srcSet = img.getAttribute('srcset') || '';
+            if (srcSet) {
+              srcSet
+                .split(',')
+                .map((part) => part.trim().split(' ')[0])
+                .filter(Boolean)
+                .forEach((url) => {
+                  const candidate = normalize(url);
+                  if (candidate) candidateUrls.push(candidate);
+                });
+            }
+
+            const src = normalize(img.getAttribute('src') || img.getAttribute('data-src') || '');
+            if (src) candidateUrls.push(src);
+          });
+
+          // Sometimes dynamic image JSON lives on wrappers.
+          Array.from(item.querySelectorAll('[data-a-dynamic-image]')).forEach((node) => {
+            extractDynamicImageUrls(node.getAttribute('data-a-dynamic-image') || '').forEach((url) =>
+              candidateUrls.push(url)
+            );
+          });
+
+          const uniqueCandidates = Array.from(new Set(candidateUrls));
+          if (uniqueCandidates.length === 0) return '';
+
+          const scoreUrl = (url) => {
+            let score = 0;
+            const lower = url.toLowerCase();
+            if (lower.includes('/images/i/')) score += 50;
+            if (lower.includes('images-na.ssl-images-amazon.com')) score += 40;
+            if (lower.includes('.jpg') || lower.includes('.jpeg') || lower.includes('.webp')) score += 20;
+            if (lower.includes('_ac_') || lower.includes('_sl')) score += 10;
+
+            // Prefer higher resolution variants when size markers exist.
+            const sizeMatches = Array.from(url.matchAll(/_(sx|sy|ux|uy)(\\d{2,4})_/gi));
+            if (sizeMatches.length > 0) {
+              const maxSize = Math.max(...sizeMatches.map((m) => parseInt(m[2], 10)).filter((n) => Number.isFinite(n)));
+              score += maxSize / 10;
+            } else {
+              score += Math.min(url.length, 120) / 10;
+            }
+
+            return score;
+          };
+
+          uniqueCandidates.sort((a, b) => scoreUrl(b) - scoreUrl(a));
+          return uniqueCandidates[0] || '';
+        };
+
+        const activeRoot =
+          document.querySelector('#sc-active-cart') ||
+          document.querySelector('#activeCartViewForm') ||
+          document.querySelector('[id*="activeCart"]') ||
+          document;
+
+        const isLikelyCartItem = (el) => {
+          const text = (el?.innerText || el?.textContent || '').trim();
+          if (!text || text.length < 25 || text.length > 12000) return false;
+          if (!el.querySelector('img')) return false;
+          if (!/(Delete|Remove|Qty|Quantity|Save for later)/i.test(text)) return false;
+          if (/(Buy it again|Recommended|Frequently bought|Customers who bought|Sponsored)/i.test(text)) {
+            return false;
+          }
+          if (el.closest('#sc-saved-cart, [id*="saved"], [class*="saved"]')) return false;
+          return true;
+        };
+
         let cartItems = [];
+        const selectors = ['.sc-list-item', '.sc-mobile-cart-list-item', '[id^="sc-item-"]', 'div[data-asin]'];
         for (const selector of selectors) {
-          const found = document.querySelectorAll(selector);
-          if (found.length > 0) { cartItems = Array.from(found); break; }
+          const found = Array.from(activeRoot.querySelectorAll(selector)).filter(isLikelyCartItem);
+          if (found.length > 0) {
+            cartItems = found;
+            break;
+          }
         }
 
         if (cartItems.length === 0) {
-          cartItems = Array.from(document.querySelectorAll('div')).filter(el => 
-            el.innerText && (el.innerText.includes('Delete') || el.innerText.includes('Qty:')) && el.querySelector('img')
-          );
+          cartItems = Array.from(activeRoot.querySelectorAll('div')).filter(isLikelyCartItem);
         }
-        
-        cartItems.forEach((item, index) => {
-          const titleEl = item.querySelector('.sc-product-title, .a-size-medium, h2, .sc-grid-item-product-title');
-          const title = (titleEl?.innerText || '').trim();
-          
-          if (!title || seenTitles.has(title)) return;
-          seenTitles.add(title);
 
-          const priceContainer = item.querySelector('.sc-price, .a-price');
-          let priceText = priceContainer ? priceContainer.innerText : '0';
-          // Fix: Extract only the FIRST price found in the text to avoid MRP/Discount merge
-          const priceMatch = priceText.match(/([0-9,.]+)/);
-          const price = priceMatch ? parseFloat(priceMatch[0].replace(/,/g, '')) : 0;
-          
+        const uniqueItems = Array.from(new Set(cartItems)).filter(
+          (item, _, all) => !all.some((other) => other !== item && item.contains(other))
+        );
+        debugLogs.push('Cart item containers: ' + uniqueItems.length);
+
+        const isSelectedItem = (item) => {
+          const cls = ((item.className || '') + ' ' + (item.getAttribute('data-state') || '')).toLowerCase();
+          if (/deselect|unselect/.test(cls)) return false;
+
+          const selector =
+            '.sc-item-checkbox input[type="checkbox"], input[type="checkbox"][name*="select"], input[type="checkbox"][id*="select"], input[type="checkbox"][aria-label*="Select"]';
+          const checkbox = item.querySelector(selector);
+          if (!checkbox) return true;
+          return !!checkbox.checked;
+        };
+
+        uniqueItems.forEach((item, index) => {
+          if (!isSelectedItem(item)) return;
+
+          const titleSelectors = [
+            '.sc-product-title',
+            '.sc-grid-item-product-title',
+            '[data-name="Active Items"] a[title]',
+            'a.a-link-normal[title]',
+            'h2',
+          ];
+
+          let title = '';
+          for (const selector of titleSelectors) {
+            const node = item.querySelector(selector);
+            const candidate = (node?.getAttribute?.('title') || node?.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (
+              candidate &&
+              candidate.length > 3 &&
+              !/(Delete|Remove|Save for later|Qty|Quantity|Sponsored)/i.test(candidate)
+            ) {
+              title = candidate;
+              break;
+            }
+          }
+
+          if (!title) return;
+
+          const priceSelectors = [
+            '.sc-price .a-offscreen',
+            '.a-price .a-offscreen',
+            '.sc-price',
+            '[class*="price"] .a-offscreen',
+          ];
+
+          let price = 0;
+          for (const selector of priceSelectors) {
+            const nodes = Array.from(item.querySelectorAll(selector));
+            for (const node of nodes) {
+              const parsed = parsePriceFromText(node.textContent || '');
+              if (parsed > 0) {
+                price = parsed;
+                break;
+              }
+            }
+            if (price > 0) break;
+          }
+
+          if (!price) {
+            const values = getCurrencyValues((item.innerText || item.textContent || '')).slice(0, 2);
+            if (values.length > 0) price = Math.min(...values);
+          }
+
           let quantity = 1;
-          const qtySelect = item.querySelector('select[name^="quantity"]');
-          if (qtySelect) {
-            quantity = parseInt(qtySelect.value);
+          const qtySelect = item.querySelector('select[name*="quantity"], [name^="quantity"]');
+          if (qtySelect && qtySelect.value) {
+            const parsedQty = parseInt(qtySelect.value, 10);
+            if (Number.isFinite(parsedQty) && parsedQty > 0) quantity = parsedQty;
           } else {
             const qtyText = item.querySelector('.a-dropdown-prompt, [class*="quantity"]')?.innerText || '';
             const qtyMatch = qtyText.match(/(\\d+)/);
-            if (qtyMatch) quantity = parseInt(qtyMatch[0]);
+            if (qtyMatch) quantity = parseInt(qtyMatch[1], 10);
           }
-          
-          const img = item.querySelector('img');
-          const imageUrl = img ? img.src : '';
-          
+
+          const imageUrl = getImageUrl(item);
+
           if (price > 0) {
+            const dedupeKey = [title.toLowerCase(), String(price), imageUrl || ('no-image-' + index)].join('|');
+            if (seenItems.has(dedupeKey)) return;
+            seenItems.add(dedupeKey);
+
             items.push({
               id: 'amz-' + Date.now() + '-' + index,
               platform: 'amazon',
@@ -84,56 +291,226 @@ const INJECTION_SCRIPTS = {
             });
           }
         });
-        
-        window.ReactNativeWebView.postMessage(JSON.stringify({ success: true, items: items }));
+
+        debugLogs.push('Selected cart items extracted: ' + items.length);
+        send({ success: true, items: items, debug: { logs: debugLogs } });
       } catch (error) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({ success: false, error: error.message }));
+        send({
+          success: false,
+          error: (error && error.message) ? error.message : 'Amazon extraction failed'
+        });
       }
     })();
   `,
 
   flipkart: `
     (function() {
+      const send = (payload) => {
+        if (
+          window.ReactNativeWebView &&
+          typeof window.ReactNativeWebView.postMessage === 'function'
+        ) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+        }
+      };
+
       try {
         const items = [];
-        const seenTitles = new Set();
-        // Look for the "Remove" buttons - they are the most reliable marker of a cart item
-        const removeButtons = Array.from(document.querySelectorAll('div, span')).filter(el => 
-          el.innerText === 'Remove' && el.offsetWidth > 0
-        );
+        const seenItems = new Set();
+        const debugLogs = ['Flipkart extractor started'];
 
-        removeButtons.forEach((btn, index) => {
-          // Find the main container for this item (usually 3-5 levels up)
-          let container = btn.parentElement;
-          for(let i=0; i<6; i++) {
-            if (container.innerText.includes('Sync') || container.querySelector('img')) break;
-            container = container.parentElement;
+        const getCurrencyValues = (value) =>
+          Array.from((value || '').matchAll(/(?:₹|Rs\\.?|INR)\\s*([0-9][0-9,]*)/gi))
+            .map((match) => parseFloat((match[1] || '').replace(/,/g, '')))
+            .filter((num) => Number.isFinite(num) && num > 0 && num <= 500000);
+
+        const getNumericValues = (value) =>
+          Array.from((value || '').matchAll(/\\b([1-9][0-9,]{2,})\\b/g))
+            .map((match) => parseFloat((match[1] || '').replace(/,/g, '')))
+            .filter((num) => Number.isFinite(num) && num > 0 && num <= 500000);
+
+        const parsePriceFromText = (value) => {
+          const currency = getCurrencyValues(value);
+          if (currency.length > 0) return currency[0];
+          const numeric = getNumericValues(value);
+          return numeric.length > 0 ? numeric[0] : 0;
+        };
+
+        const getImageUrl = (img) => {
+          if (!img) return '';
+          const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+          if (src) return src.startsWith('//') ? 'https:' + src : src;
+          const srcSet = img.getAttribute('srcset') || '';
+          if (!srcSet) return '';
+          const first = srcSet.split(',')[0]?.trim().split(' ')[0] || '';
+          return first.startsWith('//') ? 'https:' + first : first;
+        };
+
+        const resolveContainer = (seed) => {
+          let node = seed;
+          for (let depth = 0; depth < 10 && node; depth += 1) {
+            const text = (node.innerText || node.textContent || '').trim();
+            const hasImage = !!node.querySelector('img');
+            const hasPriceSignal =
+              getCurrencyValues(text).length > 0 ||
+              !!node.querySelector(
+                '._30jeq3, ._1_WHN1, [class*="price"], [class*="Price"], [class*="amount"], [class*="sellingPrice"]'
+              );
+            const hasAction = /(Remove|Save for later|Qty\\s*:|Qty\\s)/i.test(text);
+            if (hasImage && hasPriceSignal && hasAction && text.length < 5000) {
+              return node;
+            }
+            node = node.parentElement;
+          }
+          return null;
+        };
+
+        const seedNodes = [
+          ...Array.from(document.querySelectorAll('a[href*="/p/"], a[href*="/product/"]')),
+          ...Array.from(document.querySelectorAll('button, span, div')).filter(
+            (el) => /Remove/i.test((el.textContent || '').trim()) && (el.offsetWidth > 0 || el.offsetHeight > 0)
+          ),
+          ...Array.from(document.querySelectorAll('div[data-id]')),
+        ];
+
+        const containers = [];
+        seedNodes.forEach((seed) => {
+          const container = resolveContainer(seed);
+          if (container) containers.push(container);
+        });
+
+        // Fallback for DOM variants where explicit seed nodes are sparse.
+        if (containers.length === 0) {
+          const fallback = Array.from(document.querySelectorAll('div')).filter((el) => {
+            const text = (el.innerText || el.textContent || '').trim();
+            if (!text || text.length < 40) return false;
+            const hasImage = !!el.querySelector('img');
+            const hasPrice = getCurrencyValues(text).length > 0;
+            const hasAction = /(Remove|Save for later|Qty\\s*:|Qty\\s)/i.test(text);
+            return hasImage && hasPrice && hasAction && text.length < 5000;
+          });
+          containers.push(...fallback);
+        }
+
+        const uniqueContainers = Array.from(new Set(containers)).filter(
+          (container, _, all) => !all.some((other) => other !== container && container.contains(other))
+        );
+        debugLogs.push('Containers identified: ' + uniqueContainers.length);
+
+        uniqueContainers.forEach((container, index) => {
+          const text = (container.innerText || container.textContent || '').trim();
+          if (!text) return;
+
+          const imageEl = container.querySelector('img');
+          const imageUrl = getImageUrl(imageEl);
+          const imageAlt = (imageEl?.getAttribute('alt') || '').trim();
+
+          const isValidTitle = (value) => {
+            const titleText = (value || '').trim();
+            if (!titleText || titleText.length < 8) return false;
+            if (!/[A-Za-z]/.test(titleText)) return false;
+            if (/^(Hot Deal|Sponsored|Assured)$/i.test(titleText)) return false;
+            if (
+              /(Save for later|Remove|Buy this now|Qty\\s*:|Delivery by|Sold by|WOW|Buy at|Or Pay|\\bOFF\\b|₹)/i.test(
+                titleText
+              )
+            ) {
+              return false;
+            }
+            if (/^\\d+(\\.\\d+)?\\s*[•\\-]?\\s*\\(?\\d*\\)?$/.test(titleText)) return false;
+            return true;
+          };
+
+          const titleSelectors = [
+            'a[href*="/p/"]',
+            'a[href*="/product/"]',
+            'a[title]',
+            '._2Kn22P',
+            '.s1Q9rs',
+            '._2B099V',
+            '._2-uG6-',
+            '[class*="title"]',
+            '[class*="Title"]',
+            '[class*="name"]',
+          ];
+
+          let title = '';
+          for (const selector of titleSelectors) {
+            const node = container.querySelector(selector);
+            const candidate =
+              (node?.getAttribute?.('title') || node?.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (isValidTitle(candidate)) {
+              title = candidate;
+              break;
+            }
           }
 
-          const priceEl = Array.from(container.querySelectorAll('span, div')).find(el => el.innerText && el.innerText.startsWith('₹'));
-          const priceMatch = (priceEl?.innerText || '0').match(/([0-9,.]+)/);
-          const price = priceMatch ? parseFloat(priceMatch[0].replace(/,/g, '')) : 0;
+          if (!title && isValidTitle(imageAlt)) {
+            title = imageAlt;
+          }
 
-          const titleEl = container.querySelector('._2-4wDl, .sFPrp7, a[class*="title"], [class*="name"]');
-          const title = (titleEl?.innerText || '').trim();
-          
-          if (!title || seenTitles.has(title)) return;
-          seenTitles.add(title);
+          if (!title) {
+            const lines = text
+              .split(/\\n|\\r/)
+              .map((line) => line.trim())
+              .filter((line) => line.length > 2);
+            const validLines = lines.filter((line) => isValidTitle(line));
+            if (validLines.length > 0) {
+              validLines.sort((a, b) => b.length - a.length);
+              title = validLines[0];
+            }
+          }
 
-          const img = container.querySelector('img');
-          const imageUrl = img ? img.src : '';
-          
-          // Detect quantity
+          const priceSelectors = [
+            '._30jeq3',
+            '._1_WHN1',
+            '.Nx9bqj',
+            '[class*="sellingPrice"]',
+            '[class*="discountedPrice"]',
+            '[class*="finalPrice"]',
+            '[class*="price"]',
+            '[class*="Price"]',
+          ];
+
+          let price = 0;
+          for (const selector of priceSelectors) {
+            const nodes = Array.from(container.querySelectorAll(selector));
+            for (const node of nodes) {
+              const parsed = parsePriceFromText(node.textContent || '');
+              if (parsed > 0) {
+                price = parsed;
+                break;
+              }
+            }
+            if (price > 0) break;
+          }
+
+          if (!price) {
+            const currencyValues = getCurrencyValues(text);
+            if (currencyValues.length > 0) {
+              // Usually order is selling price, then struck MRP; keep the lower of first two.
+              price = Math.min(...currencyValues.slice(0, 2));
+            }
+          }
+
+          if (!title && price > 0) {
+            // Last-resort safe fallback so item isn't dropped when title selector changes.
+            title = ('Flipkart item ' + (index + 1)).trim();
+          }
+
           let quantity = 1;
-          const qtyTags = Array.from(container.querySelectorAll('div, span, input')).filter(el => 
-             el.innerText && el.innerText.match(/Qty|Qty:/i)
-          );
-          if (qtyTags.length > 0) {
-            const qMatch = qtyTags[0].parentElement.innerText.match(/(\\d+)/);
-            if (qMatch) quantity = parseInt(qMatch[0]);
+          const qtyMatch = text.match(/Qty\\s*[:\\-]?\\s*(\\d+)/i);
+          if (qtyMatch) quantity = parseInt(qtyMatch[1], 10);
+          if (!quantity || quantity < 1) {
+            const qtyInput = container.querySelector('input[value], select');
+            const inputVal = qtyInput ? parseInt(qtyInput.value || qtyInput.getAttribute('value') || '1', 10) : 1;
+            quantity = Number.isFinite(inputVal) && inputVal > 0 ? inputVal : 1;
           }
 
           if (price > 0) {
+            const dedupeKey = [title.toLowerCase(), String(price), imageUrl || ('no-image-' + index)].join('|');
+            if (seenItems.has(dedupeKey)) return;
+            seenItems.add(dedupeKey);
             items.push({
               id: 'fk-' + Date.now() + '-' + index,
               platform: 'flipkart',
@@ -144,12 +521,17 @@ const INJECTION_SCRIPTS = {
               url: window.location.href,
               addedAt: new Date().toISOString()
             });
+          } else {
+            debugLogs.push('Price missing for title: ' + title);
           }
         });
-        
-        window.ReactNativeWebView.postMessage(JSON.stringify({ success: true, items: items }));
+
+        send({ success: true, items: items, debug: { logs: debugLogs } });
       } catch (error) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({ success: false, error: error.message }));
+        send({
+          success: false,
+          error: (error && error.message) ? error.message : 'Flipkart extraction failed'
+        });
       }
     })();
   `,
