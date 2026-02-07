@@ -207,14 +207,34 @@ const INJECTION_SCRIPTS = {
         }
 
         cartItems.forEach((item, i) => {
-          const textContent = (item.innerText || item.textContent || '').replace(/\\s+/g, ' ').trim();
+          const getCurrencyValues = (value) =>
+            Array.from((value || '').matchAll(/(?:₹|Rs\\.?|INR)\\s*([0-9][0-9,]*)/gi))
+              .map((match) => parseFloat((match[1] || '').replace(/,/g, '')))
+              .filter((num) => Number.isFinite(num) && num > 0);
+
+          // Myntra item card often nests title and price in sibling blocks; walk up
+          // to find the nearest scope that includes this item's currency values.
+          let scope = item;
+          for (let depth = 0; depth < 6; depth += 1) {
+            if (!scope) break;
+            const scopeText = (scope.innerText || scope.textContent || '');
+            const currencyCount = getCurrencyValues(scopeText).length;
+            const hasPriceNode = !!scope.querySelector(
+              '[class*="sellingPrice"], [class*="discountedPrice"], [class*="finalPrice"], [class*="price"], [class*="Price"], [class*="amount"]'
+            );
+            if (currencyCount > 0 || hasPriceNode) break;
+            scope = scope.parentElement;
+          }
+          if (!scope) scope = item;
+
+          const textContent = (scope.innerText || scope.textContent || '').replace(/\\s+/g, ' ').trim();
           if (!textContent) return;
 
           const brand =
-            ((item.querySelector('.itemContainer-base-brand, [class*="brand"]') || {}).textContent || '')
+            ((scope.querySelector('.itemContainer-base-brand, [class*="brand"]') || {}).textContent || '')
               .trim();
           const itemName =
-            ((item.querySelector('.itemContainer-base-itemLink, [class*="itemName"], [class*="name"]') || {})
+            ((scope.querySelector('.itemContainer-base-itemLink, [class*="itemName"], [class*="name"]') || {})
               .textContent || '')
               .trim();
 
@@ -230,15 +250,59 @@ const INJECTION_SCRIPTS = {
 
           if (!title || seenTitles.has(title)) return;
 
-          const priceSource =
-            ((item.querySelector(
-              '.itemComponents-base-sellingPrice, [class*="sellingPrice"], [class*="discountedPrice"], [class*="price"]'
-            ) || {}).textContent || textContent);
-          const priceMatch = priceSource.match(/(?:₹|Rs\\.?)\\s*([0-9][0-9,]*)/i);
-          let price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
+          const parseNumericTokens = (value) =>
+            Array.from((value || '').matchAll(/\\d[\\d,]*/g))
+              .map((match) => parseFloat((match[0] || '').replace(/,/g, '')))
+              .filter((num) => Number.isFinite(num) && num >= 10 && num <= 500000);
+
+          const parsePriceFromText = (value) => {
+            const currencyValues = getCurrencyValues(value).filter((num) => num <= 500000);
+            if (currencyValues.length > 0) return currencyValues[0];
+            const tokens = parseNumericTokens(value);
+            return tokens.length > 0 ? tokens[0] : 0;
+          };
+
+          // Prefer explicit selling-price nodes first so we don't mix MRP/OFF numbers.
+          const priceSelectors = [
+            '.itemComponents-base-sellingPrice',
+            '[class*="sellingPrice"]',
+            '[class*="discountedPrice"]',
+            '[class*="finalPrice"]',
+            '.itemComponents-base-price',
+          ];
+
+          let price = 0;
+          for (const selector of priceSelectors) {
+            const nodes = Array.from(scope.querySelectorAll(selector));
+            for (const node of nodes) {
+              const parsed = parsePriceFromText(node.textContent || '');
+              if (parsed > 0) {
+                price = parsed;
+                break;
+              }
+            }
+            if (price > 0) break;
+          }
+
+          // Fallback: use currency values in scoped text (choose lowest among first few values).
           if (!price) {
-            const numericFallback = textContent.match(/\\b([1-9][0-9]{2,5})\\b/);
-            price = numericFallback ? parseFloat(numericFallback[1]) : 0;
+            const scopedCurrencyValues = getCurrencyValues(textContent).filter((num) => num <= 500000);
+            if (scopedCurrencyValues.length > 0) {
+              price = Math.min(...scopedCurrencyValues.slice(0, 3));
+            }
+          }
+
+          // Final strict fallback from price-related classes only.
+          if (!price) {
+            const strictNumericValues = Array.from(
+              scope.querySelectorAll(
+                '[class*="sellingPrice"], [class*="discountedPrice"], [class*="finalPrice"], [class*="price"], [class*="Price"], [class*="amount"]'
+              )
+            )
+              .map((el) => parsePriceFromText(el.textContent || ''))
+              .filter((num) => Number.isFinite(num) && num > 0);
+
+            price = strictNumericValues.length > 0 ? strictNumericValues[0] : 0;
           }
 
           let quantity = 1;
