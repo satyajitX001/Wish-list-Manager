@@ -10,6 +10,7 @@ export type TabParamList = {
     Marketplace: undefined;
     Cart: undefined;
     Accounting: undefined;
+
 };
 
 const Tab = createBottomTabNavigator<TabParamList>();
@@ -35,7 +36,7 @@ export const TabNavigator: React.FC = () => {
                 },
             }}
         >
-            <Tab.Screen
+            {/* <Tab.Screen
                 name="Marketplace"
                 component={MarketplaceScreen}
                 options={{
@@ -43,7 +44,7 @@ export const TabNavigator: React.FC = () => {
                         <ShoppingBag size={size} color={color} />
                     ),
                 }}
-            />
+            /> */}
             <Tab.Screen
                 name="Cart"
                 component={AggregatorScreen}

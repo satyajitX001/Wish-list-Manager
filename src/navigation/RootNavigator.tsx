@@ -50,6 +50,7 @@ export const RootNavigator: React.FC = () => {
     return (
         <NavigationContainer>
             <Stack.Navigator screenOptions={{ headerShown: false }}>
+
                 {/* {!isAuthenticated ? (
                     <>
                         <Stack.Screen name="Login">

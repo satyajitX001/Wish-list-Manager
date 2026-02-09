@@ -733,7 +733,7 @@ export const WebViewCartSync: React.FC<WebViewCartSyncProps> = ({
   onClose,
 }) => {
   const webViewRef = useRef<WebView>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const { setAmazonCart, setFlipkartCart, setMyntraCart } = useCartStore();
 
   const handleMessage = (event: any) => {
@@ -818,8 +818,8 @@ export const WebViewCartSync: React.FC<WebViewCartSyncProps> = ({
         ref={webViewRef}
         source={{ uri: PLATFORM_URLS[platform] }}
         originWhitelist={['*']}
-        onLoadStart={() => setLoading(true)}
-        onLoadEnd={() => setLoading(false)}
+        // onLoadStart={() => setLoading(true)}
+        // onLoadEnd={() => setLoading(false)}
         onMessage={handleMessage}
         javaScriptEnabled={true}
         domStorageEnabled={true}
