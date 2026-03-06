@@ -13,6 +13,7 @@ import { colors, spacing, fontSize, fontWeight, borderRadius } from '../../../th
 import { formatPrice, formatCompactNumber } from '../../../utils';
 import { useCartStore } from '../../../store';
 import { TrendingUp, ShoppingCart, DollarSign, Package } from 'lucide-react-native';
+import { DrawerMenuButton } from '../../../navigation/components/DrawerMenuButton';
 
 const { width } = Dimensions.get('window');
 
@@ -146,7 +147,10 @@ export const AccountingScreen: React.FC = () => {
     return (
         <SafeAreaView style={styles.container}>
             <View style={styles.header}>
-                <Text style={styles.headerTitle}>Accounting</Text>
+                <View style={styles.headerTopRow}>
+                    <Text style={styles.headerTitle}>Accounting</Text>
+                    <DrawerMenuButton />
+                </View>
                 <Text style={styles.headerSubtitle}>Track your spending across platforms</Text>
             </View>
 
@@ -219,6 +223,11 @@ const styles = StyleSheet.create({
         padding: spacing.lg,
         borderBottomWidth: 1,
         borderBottomColor: colors.border,
+    },
+    headerTopRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
     },
     headerTitle: {
         fontSize: fontSize.xxl,

@@ -18,6 +18,7 @@ import { ShoppingBag, Trash2, Plus, Minus, ExternalLink, PlusCircle } from 'luci
 import { SyncCartsButton } from '../components/SyncCartsButton';
 import { AddItemManually } from '../components/AddItemManually';
 import { WebViewCartSync } from '../components/WebViewCartSync';
+import { DrawerMenuButton } from '../../../navigation/components/DrawerMenuButton';
 
 const PLATFORM_COLORS = {
     amazon: colors.amazon,
@@ -179,6 +180,7 @@ export const AggregatorScreen: React.FC = () => {
                     <Text style={styles.headerSubtitle}>All your shopping in one place</Text>
                 </View>
                 <View style={styles.headerActions}>
+                    <DrawerMenuButton />
                     <TouchableOpacity
                         style={styles.iconButton}
                         onPress={() => setShowAddManual(true)}

@@ -1,10 +1,10 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { ShoppingBag, ShoppingCart, DollarSign } from 'lucide-react-native';
-import { colors } from '../theme/colors';
-import { MarketplaceScreen } from '../features/marketplace';
+import { ShoppingCart, DollarSign } from 'lucide-react-native';
+import { themePalettes } from '../theme';
 import { AggregatorScreen } from '../features/aggregator';
 import { AccountingScreen } from '../features/accounting';
+import { useThemeStore } from '../store';
 
 export type TabParamList = {
     Marketplace: undefined;
@@ -16,6 +16,9 @@ export type TabParamList = {
 const Tab = createBottomTabNavigator<TabParamList>();
 
 export const TabNavigator: React.FC = () => {
+    const mode = useThemeStore((state) => state.mode);
+    const colors = themePalettes[mode];
+
     return (
         <Tab.Navigator
             screenOptions={{

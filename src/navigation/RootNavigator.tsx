@@ -1,13 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import React, { useMemo, useEffect } from 'react';
+import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '../api/firebase';
-import { useAuthStore } from '../store';
-import { colors } from '../theme';
-import { LoginScreen, OTPScreen } from '../features/auth';
-import { TabNavigator } from './TabNavigator';
+import { useAuthStore, useThemeStore } from '../store';
+import { themePalettes } from '../theme';
+import { DrawerNavigator } from './DrawerNavigator';
 
 export type RootStackParamList = {
     Login: undefined;
@@ -18,8 +17,9 @@ export type RootStackParamList = {
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export const RootNavigator: React.FC = () => {
-    const { isAuthenticated, setUser, setLoading, isLoading } = useAuthStore();
-    const [currentPhone, setCurrentPhone] = useState('');
+    const { setUser, isLoading } = useAuthStore();
+    const mode = useThemeStore((state) => state.mode);
+    const palette = themePalettes[mode];
 
     useEffect(() => {
         const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
@@ -37,65 +37,36 @@ export const RootNavigator: React.FC = () => {
         });
 
         return unsubscribe;
-    }, []);
+    }, [setUser]);
+
+    const navigationTheme = useMemo(() => {
+        const baseTheme = mode === 'dark' ? DarkTheme : DefaultTheme;
+        return {
+            ...baseTheme,
+            colors: {
+                ...baseTheme.colors,
+                background: palette.background,
+                card: palette.backgroundCard,
+                border: palette.border,
+                text: palette.text,
+                primary: palette.primary,
+                notification: palette.secondary,
+            },
+        };
+    }, [mode, palette]);
 
     if (isLoading) {
         return (
-            <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color={colors.primary} />
+            <View style={[styles.loadingContainer, { backgroundColor: palette.background }]}>
+                <ActivityIndicator size="large" color={palette.primary} />
             </View>
         );
     }
 
     return (
-        <NavigationContainer>
+        <NavigationContainer theme={navigationTheme}>
             <Stack.Navigator screenOptions={{ headerShown: false }}>
-
-                {/* {!isAuthenticated ? (
-                    <>
-                        <Stack.Screen name="Login">
-                            {({ navigation }) => (
-                                <LoginScreen
-                                    onPhoneSubmit={(phone) => {
-                                        setCurrentPhone(phone);
-                                        navigation.navigate('OTP', { phoneNumber: phone });
-                                    }}
-                                    onGoogleSignIn={() => {
-                                        // TODO: Implement Google Sign-in
-                                        console.log('Google Sign-in');
-                                    }}
-                                    onEmailLogin={() => {
-                                        // TODO: Implement Email Login
-                                        console.log('Email Login');
-                                    }}
-                                />
-                            )}
-                        </Stack.Screen>
-                        <Stack.Screen name="OTP">
-                            {({ route, navigation }) => (
-                                <OTPScreen
-                                    phoneNumber={route.params.phoneNumber}
-                                    onVerify={(otp) => {
-                                        // TODO: Implement OTP verification
-                                        console.log('Verify OTP:', otp);
-                                        // For now, simulate successful login
-                                        setUser({
-                                            uid: 'demo-user',
-                                            phoneNumber: route.params.phoneNumber,
-                                        });
-                                    }}
-                                    onResend={() => {
-                                        console.log('Resend OTP');
-                                    }}
-                                    onBack={() => navigation.goBack()}
-                                />
-                            )}
-                        </Stack.Screen>
-                    </>
-                ) : (
-                    <Stack.Screen name="Main" component={TabNavigator} />
-                )} */}
-                <Stack.Screen name="Main" component={TabNavigator} />
+                <Stack.Screen name="Main" component={DrawerNavigator} />
             </Stack.Navigator>
         </NavigationContainer>
     );
@@ -106,6 +77,5 @@ const styles = StyleSheet.create({
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
-        backgroundColor: colors.background,
     },
 });
